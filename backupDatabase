@@ -1,0 +1,485 @@
+#!/bin/bash
+##############################################################################
+#
+# Database Backup Script
+#
+# Copyright (c) 2017 Shane Rogers
+#
+# License: BSD-3-Clause, see LICENSE file
+#
+##############################################################################
+
+_PROGRAM_NAME=$(readlink --canonicalize --no-newline "$0" | xargs basename )
+_PROGRAM_VERSION="1.0.0"
+
+readonly INFO=2
+readonly NOTICE=1
+
+EXIT_PREREQ_MISSING=127
+EXIT_BACKUP_FAILED=7
+EXIT_PRUNING=6
+EXIT_DISK_ERROR=5
+EXIT_BAD_CONFIG=4
+EXIT_HOME_UNSET=3
+EXIT_INVALID_OPTION=2
+
+declare -a databaseNames
+declare -a mysqlOptions=()
+declare -a awsOptions=()
+
+# This is only used if the value is not set in the configuration
+DEFAULT_BACKUPS_TO_KEEP=10
+
+umask 0077
+
+#
+# Main Program Logic
+#
+# This allows the main program logic to be at the top of the script even
+# though the functions have to be defined before they are called.
+#
+function main {
+   local exit_code=0
+   local backup_status
+
+   currentTime="$( date +%Y-%m-%d-%H%M%S)"
+   verify_environment
+   read_configuration
+   set_mysql_options
+   set_aws_options
+   load_database_list
+   setup_backup_directory
+   for database in "${databaseNames[@]}"; do
+     backup_database "${database}"
+     backup_status="$?"
+     # If something happened raise the value we return, unless
+     # something more serious already was reported.
+     if [[ "${error_code}" -lt "${backup_status}" ]]; then
+       exit_code="${backup_status}"
+     fi
+   done
+   builtin exit "${exit_code}"
+}
+
+#
+# Clean up any files we have created
+#
+# This is triggered by an exit trap.
+#
+function clean_up {
+  # Be really picky about what we delete.
+  if [[ -n "${backupDirectory}" && -d "${backupDirectory}" && "${backupDirectory}" != "/" && "${backupDirectory}" != "${backupRoot}" ]]; then
+    notice "Removing ${backupDirectory}"
+    if ! rm -r "${backupDirectory}"; then
+      error "WARNING: rm returned $?"
+      error "WARNING: Unable to remove ${backupDirectory}"
+      builtin exit "${EXIT_DISK_ERROR}"
+    fi
+    # Make sure it actually went away
+    if [[ -e "${backupDirectory}" ]]; then
+      error "WARNING: backup directory still exists"
+      error "WARNING: Unable to remove ${backupDirectory}"
+      builtin exit "${EXIT_DISK_ERROR}"
+    fi
+  # It is not empty but we didn't try to delete it.
+  elif [[ -n "${backupDirectory}" ]]; then
+    error "WARNING: Not deleting backup directory because of its location"
+    error "WARNING: Unable to remove ${backupDirectory}"
+    builtin exit "${EXIT_DISK_ERROR}"
+  fi
+}
+
+#
+# Do the actual backup and store it.
+#
+function backup_database {
+
+  local database
+  local skip_database
+  local zip_database
+  local database_zip_setting
+  local database_bucket_setting
+  local database_keep_setting
+  local bucket_name
+  local backups_to_keep
+  local backup_files
+  local backup_count=0
+  local return_code=0
+
+  if [[ -z "$1" ]]; then
+    error "Got an empty database name for backup."
+    return
+  fi
+
+  database="$1"
+
+  eval skip_database=\$$"INI__${database}__skip"
+  if [[ "${skip_database}" == 1 ]]; then
+    info "Skipping ${database}"
+    return
+  fi
+  eval database_zip_setting=\$$"INI__${database}__zip"
+  if [[ "${database_zip_setting}" == 1 ]]; then
+    zip_database=true
+    info "Found custom zip setting for ${database}"
+  else
+    zip_database=defaultZipSetting
+    info "Using default zip setting for ${database}"
+  fi
+
+  eval database_bucket_setting=\$$"INI__${database}__bucket"
+  if [[ -n "${database_bucket_setting}" ]]; then
+    bucket_name="${database_bucket_setting}"
+    info "Found custom bucket for ${database}: ${bucket_name}"
+  elif [[ -n "${defaultBucket}" ]]; then
+    bucket_name="${defaultBucket}"
+    info "Using default bucklet for ${database}"
+  else
+    error "ERROR: ${database} has no custom bucket and no default bucket is set"
+    error "ERROR: The backup for ${database} can not be uploaded."
+    return "${EXIT_BACKUP_FAILED}"
+  fi
+
+  eval database_keep_setting=\$$"INI__${database}__keep"
+  if [[ -n "${database_keep_setting}" ]]; then
+    backups_to_keep="${database_keep_setting}"
+    info "Found custom number of backups to keep for ${database}: ${backsup_to_keep}"
+  elif [[ -n "${INI__default__keep}" ]]; then
+    backups_to_keep="${INI__default__keep}"
+    info "Using default number of backups to keep for ${database}"
+  else
+    notice "WARNING: ${database} has no custom number of backups to keep and no"
+    notice "default number of backups is set in the configuration file. Using ${DEFAULT_BACKUPS_TO_KEEP}."
+    backups_to_keep="${DEFAULT_BACKUPS_TO_KEEP}"
+  fi
+
+  notice "Backup of ${database} starting..."
+
+  backupFile="${database}.${currentTime}.sql"
+  backupFileLocation="${backupDirectory}/${backupFile}"
+  if [[ "${zip_database}" == true ]]; then
+    uploadFile="${backupFile}.tgz"
+    uploadFileLocation="${backupDirectory}/${backupFile}"
+  else
+    uploadFile="${backupFile}"
+    uploadFileLocation="${backupDirectory}/${backupFile}"
+  fi
+  if ! mysqldump "${mysqlOptions[@]}" "${database}" > "${backupFileLocation}"; then
+    error "ERROR: Mysqldump of ${database} returned $?"
+    error "ERROR: Backup of ${database} failed!"
+    return "${EXIT_BACKUP_FAILED}"
+  fi
+
+  # Make sure it exists.
+  if [[ ! -f "${backupFileLocation}" ]]; then
+    error "ERROR: Backup file for ${database} not found"
+    error "ERROR: Backup of ${database} failed!"
+    return "${EXIT_BACKUP_FAILED}"
+  fi
+
+  if [[ "${zip_database}" == true ]]; then
+    if ! tar -czf "${uploadFileLocation}" "${backupFileLocation}"; then
+      error "ERROR: Unable to zip backup of ${database}"
+      error "ERROR: Attempting to upload unziped file"
+      uploadFile="${backupFile}"
+      uploadFileLocation="${backupDirectory}/${backupFile}"
+    fi
+  fi
+
+  if [[ ! -f "${uploadFileLocation}" ]]; then
+    error "ERROR: Could not find upload file for ${database}"
+    return "${EXIT_BACKUP_FAILED}"
+  fi
+  if ! aws s3 "${awsOptions[@]}" cp "${uploadFileLocation}" "s3://${bucket_name}/"; then
+    error "ERROR: S3 upload returned $? for ${database}"
+    error "ERROR: Backup file for ${database} was probably not uploaded"
+    return "${EXIT_BACKUP_FAILED}"
+  fi
+
+  #######################
+   #                     #
+    #  Pruning Section    #
+    #                     #
+   #                     #
+  #######################
+  if ! backup_files=( $( aws s3 ls "s3://${bucket_name}/${database}" | sort -r | cut -d " " -s -f11 ) ) ; then
+    error "ERROR: Could not load list of backup files for ${database}"
+    error "ERROR: Unable to prune backups for ${database}"
+    return "${EXIT_PRUNING}"
+  fi
+  if [[ "${#backup_files[@]}" -lt "${backups_to_keep}" ]]; then
+    info "Backups to keep (${backups_to_keep}) is greater than the number of"
+    info "existing backups (${#backup_files[@]}) of ${database}. Not pruning."
+    notice "Backup of ${database} finished"
+    return 0
+  fi
+  for backup_file in "${backup_files[@]}"; do
+    backup_count=$(( backup_count + 1 ))
+    if [[ "${backup_count}" -gt "${backups_to_keep}" ]]; then
+      notice "Removing backup ${backup_file} (backup ${backup_count})"
+      if ! aws s3 "${awsOptions[@]}" rm "s3://${bucket_name}/${backup_file}"; then
+        error "ERROR: S3 returned $? when trying to remove s3://{bucket_name}/${backup_file}"
+        error "ERROR: Unable to remove backup file ${backup_file}"
+        return_code="${EXIT_PRUNING}"
+      fi
+    fi
+  done
+  notice "Backup of ${database} finished"
+  return "${return_code}"
+}
+
+#
+# Read our configuration file.
+#
+function read_configuration {
+  notice "Reading Configuration"
+  if [[ -z "${CONFIG_FILE}" ]]; then
+     CONFIG_FILE="${HOME}/.ig_backup"
+     info "Using default config file ${CONFIG_FILE}"
+  else
+     notice "Reading config file ${CONFIG_FILE}"
+  fi
+
+  if ! CONFIG_FILE=$( readlink -s -n -e "${CONFIG_FILE}" 2>/dev/null) ; then
+    exit "${EXIT_PREREQ_MISSING}" "Unable to locate configuration file."
+  fi
+
+  read_ini "${CONFIG_FILE}" --booleans 1
+
+  # At the very, very least we need a bucket name.
+  if [[ -z "${INI__default__bucket}" && "${INI__NUMSECTIONS}" -le "1" ]]; then
+    error "No bucket listed in default configuration section and config file"
+    error "does not contain individual database sections, so we have no"
+    exit "${EXIT_BAD_CONFIG}" "bucket to store the backups in."
+  fi
+
+  if [[ -n "${INI__default__zip}" ]]; then
+    defaultZipSetting="${INI__default__zip}"
+  else
+    defaultZipSetting=false
+  fi
+}
+
+#
+# Sets any connection options for mysql
+#
+function set_mysql_options {
+  [[ -n "${INI__default__host}" ]] && mysqlOptions+=( "--host" "${INI__default__host}" )
+  [[ -n "${INI__default__user}" ]] && mysqlOptions+=( "--user" "${INI__default__user}" )
+  [[ -n "${INI__default__password}" ]] && mysqlOptions+=( "--password=\"${INI__default__password}\"" )
+  [[ -n "${INI__default__port}" ]] && mysqlOptions+=( "--port=${INI__default__port}" )
+}
+
+#
+# Sets any default options for uploading to S3
+#
+function set_aws_options {
+  [[ -n "${INI__default__bucket}" ]] && defaultBucket="${INI__default__bucket}"
+  [[ -n "${INI__default__profile}" ]] && awsOptions+=( "--profile" "${INI__default__profile}" )
+}
+
+#
+# Load the list of databases we are using into $databaseNames
+#
+function load_database_list {
+  notice "Loading database list"
+  info "Mysql Options: ${mysqlOptions[@]}"
+  databaseNames=( $( echo "SHOW DATABASES;" | mysql "${mysqlOptions[@]}" -s | sed -r -e '/^mysql$/d;/^information_schema$/d;/^performance_schema/d;' ) )
+
+  if [[ "${#databaseNames[@]}" -lt "1" ]]; then
+    notice "No databases found. Exiting"
+    exit 0
+  fi
+  for database in "${databaseNames[@]}"; do
+    info "${database}"
+  done
+}
+
+#
+# Set up the directory we are using to make backups
+#
+function setup_backup_directory {
+  if [[ -n "${INI__default__backup_directory}" ]]; then
+    backupRoot="${INI__default__backup_directory}"
+  else
+    backupRoot="${HOME}"
+  fi
+
+  if ! backupRoot=$( readlink -s -n -e "${backupRoot}" 2>/dev/null) ; then
+    exit "${EXIT_DISK_ERROR}" "Unable to resolve ${backupRoot} to a file system location."
+  fi
+
+  if [[ ! -d "${backupRoot}" ]]; then
+    exit "${EXIT_DISK_ERROR}" "Unable to find directory ${backupRoot}"
+  elif [[ ! -w "${backupRoot}" ]]; then
+    exit "${EXIT_DISK_ERROR}" "Unable to write to directory ${backupRoot}"
+  fi
+
+  backupTemplate=".ig_backup_directory.${currentTime}.XXXXXXXX"
+
+  notice "Using backup root ${backupRoot}"
+  if ! backupDirectory="$( mktemp --quiet --directory --tmpdir="${backupRoot}" "${backupTemplate}" )" ; then
+    exit "${EXIT_DISK_ERROR}" "Unable to make temporary directory"
+  fi
+
+  notice "Tmp Directory: ${backupDirectory}"
+}
+
+#
+# Make sure all the bits we need are here
+#
+function verify_environment {
+
+  local -a neededUtilities=( readlink sed aws mysql mysqldump )
+  local utilityName
+
+  for utilityName in "${neededUtilities[@]}"; do
+    if ! which "${utilityName}" 1> /dev/null 2>&1; then
+      exit "${EXIT_PREREQ_MISSING}" "Unable to find ${utilityName}. This isn't going to work."
+    else
+       info "Found ${utilityName}"
+    fi
+  done
+
+  if [[ -z "${HOME}" ]]; then
+     exit "${EXIT_HOME_UNSET}" "\$HOME is empty or not set."
+  fi
+
+  verify_ini_parser
+}
+
+#
+# Verify and Include Ini Parser Script
+#
+function verify_ini_parser {
+  sourceDirectory="$( cd "$( dirname "$( readlink -m "${BASH_SOURCE[0]}" )")" && pwd )"
+
+  if [[ -e "${sourceDirectory}/bash_ini_parser/read_ini.sh" ]]; then
+     source "${sourceDirectory}/bash_ini_parser/read_ini.sh"
+  else
+     exit "${EXIT_PREREQ_MISSING}" "Unable to find the ini parser script."
+  fi
+}
+
+#
+# Output an info level message if we are at the right debug level.
+#
+function info {
+  [[ "${DEBUG_LEVEL}" -ge "${INFO}" ]]  && echo "$@"
+}
+
+#
+# Output a notice level message if we are at the right debug level.
+#
+function notice {
+  [[ "${DEBUG_LEVEL}" -ge "${NOTICE}" ]] && echo "$@"
+}
+
+#
+# Output an error level message. We are probably about to exit but
+# may need to send multiple lines of output. Unlike info and notice,
+# this writes to STDERR.
+#
+function error {
+  echo -e "$@" 1>&2
+}
+
+#
+# Display an error message and exit with the given error level.
+#
+# Usage: error [error_level] "Message"
+#
+function exit {
+  local exit_code="$1"
+  shift
+  echo -e "$@" 1>&2
+  builtin exit "${exit_code}"
+}
+
+#
+# Display help.
+#
+# This is also used by help2man to generate the man page.
+#
+function show_help_message {
+  echo "Usage: databaseBackup [OPTIONS]"
+  echo ""
+  echo "Backup a local database server to S3."
+  echo ""
+  echo "This backups up databases to individual files on S3. It can be"
+  echo "configured to retain a set number of backups. Each database can"
+  echo "be managed independently."
+
+  printf " %-15s%s\n" "-d --debug [LEVEL]" "Display debug information. More"
+  printf " %-15s%s\n" " " "information is available with -dd or by setting"
+  printf " %-15s%s\n" " " "--debug=2"
+  printf " %-15s%s\n" "-h --help" "Display this or help"
+  printf " %-15s%s\n" "-v --version" "Display the version information"
+  echo ""
+  if [[ ! -z "$2" ]]; then
+    if [[ "$1" == "0" ]]; then
+      echo -e "$2"
+      echo ""
+    else
+      echo -e "$2" >&2
+      echo ""
+    fi
+  fi
+  builtin exit "$1"
+}
+
+##############################################################################
+#
+#                          Execution Starts Here
+#
+##############################################################################
+
+trap clean_up EXIT
+
+OPTIONS=$(getopt -n "${_PROGRAM_NAME}" -o 'c:d::h::v' --long "config:,debug::,help::,version" -- "$@")
+eval set -- "${OPTIONS}"
+
+while true; do
+  case "$1" in
+    -c|--config)
+         CONFIG_FILE="$2"
+         shift 2
+       ;;
+    -d|--debug)
+       case "$2" in
+         ""|1)
+           DEBUG_LEVEL="${NOTICE}"
+           echo "Showing debug information"
+           shift 2
+           ;;
+         d|2)
+           DEBUG_LEVEL="${INFO}"
+           echo "Showing detailed debug information"
+           shift 2
+           ;;
+         *)
+           exit 1 "Unknown debug level $2"
+           ;;
+       esac
+       ;;
+    -h|--help)
+       show_help_message 0
+       ;;
+    -v|--version)
+       echo "${_PROGRAM_NAME} ${_PROGRAM_VERSION}"
+       echo ""
+       echo 'Copyright (C) 2017 Shane Rogers.'
+       builtin exit 0
+       ;;
+    --)
+       shift
+       break
+       ;;
+    \?)
+      show_help_message 3 "\nError: Invalid option: ${OPTARG}"
+      exit "${EXIT_INVALID_OPTION}" "Invalid option -${OPTARG}"
+      ;;
+  esac
+done
+
+main
