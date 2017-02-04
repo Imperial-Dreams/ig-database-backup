@@ -29,6 +29,7 @@ declare -a awsOptions=()
 
 # This is only used if the value is not set in the configuration
 DEFAULT_BACKUPS_TO_KEEP=10
+DEFAULT_CONFIG_FILE=".ig_backup.config"
 
 umask 0077
 
@@ -70,7 +71,7 @@ function clean_up {
   # Be really picky about what we delete.
   if [[ -n "${backupDirectory}" && -d "${backupDirectory}" && "${backupDirectory}" != "/" && "${backupDirectory}" != "${backupRoot}" ]]; then
     notice "Removing ${backupDirectory}"
-    if ! rm -r "${backupDirectory}"; then
+    if ! rm -r "${backupDirectory}" 1>/dev/null 2>&1; then
       error "WARNING: rm returned $?"
       error "WARNING: Unable to remove ${backupDirectory}"
       builtin exit "${EXIT_DISK_ERROR}"
@@ -102,7 +103,7 @@ function backup_database {
   local database_keep_setting
   local bucket_name
   local backups_to_keep
-  local backup_files
+  local -a backup_files
   local backup_count=0
   local return_code=0
 
@@ -113,20 +114,24 @@ function backup_database {
 
   database="$1"
 
+  # shellcheck disable=SC2086
   eval skip_database=\$$"INI__${database}__skip"
   if [[ "${skip_database}" == 1 ]]; then
     info "Skipping ${database}"
     return
   fi
+
+  # shellcheck disable=SC2086
   eval database_zip_setting=\$$"INI__${database}__zip"
-  if [[ "${database_zip_setting}" == 1 ]]; then
-    zip_database=true
-    info "Found custom zip setting for ${database}"
+  if [[ -n "${database_zip_setting}" ]]; then
+    zip_database="${database_zip_setting}"
+    info "Found custom zip setting for ${database}: ${zip_database}"
   else
-    zip_database=defaultZipSetting
-    info "Using default zip setting for ${database}"
+    zip_database="${defaultZipSetting}"
+    info "Using default zip setting for ${database}: ${zip_database}"
   fi
 
+  # shellcheck disable=SC2086
   eval database_bucket_setting=\$$"INI__${database}__bucket"
   if [[ -n "${database_bucket_setting}" ]]; then
     bucket_name="${database_bucket_setting}"
@@ -140,6 +145,7 @@ function backup_database {
     return "${EXIT_BACKUP_FAILED}"
   fi
 
+  # shellcheck disable=SC2086
   eval database_keep_setting=\$$"INI__${database}__keep"
   if [[ -n "${database_keep_setting}" ]]; then
     backups_to_keep="${database_keep_setting}"
@@ -157,13 +163,21 @@ function backup_database {
 
   backupFile="${database}.${currentTime}.sql"
   backupFileLocation="${backupDirectory}/${backupFile}"
-  if [[ "${zip_database}" == true ]]; then
+  if [[ "${zip_database}" == 1 ]]; then
     uploadFile="${backupFile}.tgz"
-    uploadFileLocation="${backupDirectory}/${backupFile}"
+    uploadFileLocation="${backupDirectory}/${uploadFile}"
   else
     uploadFile="${backupFile}"
     uploadFileLocation="${backupDirectory}/${backupFile}"
   fi
+
+  #######################
+   #                     #
+    #  Backup Section     #
+    #                     #
+   #                     #
+  #######################
+
   if ! mysqldump "${mysqlOptions[@]}" "${database}" > "${backupFileLocation}"; then
     error "ERROR: Mysqldump of ${database} returned $?"
     error "ERROR: Backup of ${database} failed!"
@@ -177,8 +191,15 @@ function backup_database {
     return "${EXIT_BACKUP_FAILED}"
   fi
 
-  if [[ "${zip_database}" == true ]]; then
-    if ! tar -czf "${uploadFileLocation}" "${backupFileLocation}"; then
+  #######################
+   #                     #
+    #    Zip Section      #
+    #                     #
+   #                     #
+  #######################
+
+  if [[ "${zip_database}" == 1 ]]; then
+    if ! tar --create --gzip --file "${uploadFileLocation}" --directory "${backupDirectory}" "${backupFile}"; then
       error "ERROR: Unable to zip backup of ${database}"
       error "ERROR: Attempting to upload unziped file"
       uploadFile="${backupFile}"
@@ -186,11 +207,18 @@ function backup_database {
     fi
   fi
 
+  #######################
+   #                     #
+    #   Upload Section    #
+    #                     #
+   #                     #
+  #######################
+
   if [[ ! -f "${uploadFileLocation}" ]]; then
     error "ERROR: Could not find upload file for ${database}"
     return "${EXIT_BACKUP_FAILED}"
   fi
-  if ! aws s3 "${awsOptions[@]}" cp "${uploadFileLocation}" "s3://${bucket_name}/"; then
+  if ! aws s3 "${awsOptions[@]}" cp "${uploadFileLocation}" "s3://${bucket_name}/" 1>/dev/null 2>&1; then
     error "ERROR: S3 upload returned $? for ${database}"
     error "ERROR: Backup file for ${database} was probably not uploaded"
     return "${EXIT_BACKUP_FAILED}"
@@ -202,11 +230,12 @@ function backup_database {
     #                     #
    #                     #
   #######################
-  if ! backup_files=( $( aws s3 ls "s3://${bucket_name}/${database}" | sort -r | cut -d " " -s -f11 ) ) ; then
+  if ! backup_files=( $( aws s3 ls "s3://${bucket_name}/${database}" | sed -r -e "s/ +/ /g" | cut -d " " -s -f4 | sort -r ) ) ; then
     error "ERROR: Could not load list of backup files for ${database}"
     error "ERROR: Unable to prune backups for ${database}"
     return "${EXIT_PRUNING}"
   fi
+
   if [[ "${#backup_files[@]}" -lt "${backups_to_keep}" ]]; then
     info "Backups to keep (${backups_to_keep}) is greater than the number of"
     info "existing backups (${#backup_files[@]}) of ${database}. Not pruning."
@@ -217,7 +246,7 @@ function backup_database {
     backup_count=$(( backup_count + 1 ))
     if [[ "${backup_count}" -gt "${backups_to_keep}" ]]; then
       notice "Removing backup ${backup_file} (backup ${backup_count})"
-      if ! aws s3 "${awsOptions[@]}" rm "s3://${bucket_name}/${backup_file}"; then
+      if ! aws s3 "${awsOptions[@]}" rm "s3://${bucket_name}/${backup_file}" 1>/dev/null 2>&1; then
         error "ERROR: S3 returned $? when trying to remove s3://{bucket_name}/${backup_file}"
         error "ERROR: Unable to remove backup file ${backup_file}"
         return_code="${EXIT_PRUNING}"
@@ -234,7 +263,7 @@ function backup_database {
 function read_configuration {
   notice "Reading Configuration"
   if [[ -z "${CONFIG_FILE}" ]]; then
-     CONFIG_FILE="${HOME}/.ig_backup"
+     CONFIG_FILE="${HOME}/${DEFAULT_CONFIG_FILE}"
      info "Using default config file ${CONFIG_FILE}"
   else
      notice "Reading config file ${CONFIG_FILE}"
@@ -254,9 +283,11 @@ function read_configuration {
   fi
 
   if [[ -n "${INI__default__zip}" ]]; then
+    info "Setting default zip to ${INI__default__zip}"
     defaultZipSetting="${INI__default__zip}"
   else
-    defaultZipSetting=false
+    info "Using hardcoded default zip"
+    defaultZipSetting=0
   fi
 }
 
