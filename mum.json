@@ -14,16 +14,11 @@
       {
         "source": "./man/man1/",
         "installTo": "/usr/share/man/man1/"
-      },
-      {
-        "source": "./install/linkToBin",
-        "installTo": "./"
       }
     ],
     "scripts": {
       "afterInstall": [
         "install/updateManDb",
-        "./linkToBin"
       ]
     }
   },
