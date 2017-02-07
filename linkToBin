@@ -1,11 +1,14 @@
 #!/bin/bash
-pwd
+
+binLocation="$( cd "$( dirname "$( readlink -m "${BASH_SOURCE[0]}" )")" && pwd )"
+echo "Found bin at ${binLocation}"
 if [[ ! -e "/usr/local/bin/igbm" ]]; then
   echo "Creating link."
-  ln -s ./igbm /usr/local/bin/igbm
+  cd /usr/local/bin
+  ln -s "${binLocation}/igbm" igbm
 else
   echo "Link exists. Skipping"
 fi
 
 echo "Cleaning up...."
-rm linkToBin
+rm "${binLocation}/linkToBin"
