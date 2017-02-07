@@ -18,7 +18,7 @@
     ],
     "scripts": {
       "afterInstall": [
-        "install/updateManDb",
+        "install/updateManDb"
       ]
     }
   },
