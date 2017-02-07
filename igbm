@@ -1,7 +1,7 @@
 #!/bin/bash
 ##############################################################################
 #
-# Database Backup Script
+# IG Database Backup Script
 #
 # Copyright (c) 2017 Shane Rogers
 #
@@ -29,7 +29,7 @@ declare -a awsOptions=()
 
 # This is only used if the value is not set in the configuration
 DEFAULT_BACKUPS_TO_KEEP=10
-DEFAULT_CONFIG_FILE=".ig_backup.config"
+DEFAULT_CONFIG_FILE=".igbm.conf"
 
 umask 0077
 
@@ -236,7 +236,13 @@ function backup_database {
     return "${EXIT_PRUNING}"
   fi
 
-  if [[ "${#backup_files[@]}" -lt "${backups_to_keep}" ]]; then
+  if [[ "${backups_to_keep}" == "all" || "${backups_to_kep}" -eq "0" ]]; then
+    info "Backups to keep (${backups_to_keep}) is zero. Pruning ${database} is"
+    info "disabled."
+    notice "Backup of ${database} finished"
+    return 0
+  fi
+  if [[ "${#backup_files[@]}" -lt "${backups_to_keep}" || "${backups_to_kep}" -eq "0" ]]; then
     info "Backups to keep (${backups_to_keep}) is greater than the number of"
     info "existing backups (${#backup_files[@]}) of ${database}. Not pruning."
     notice "Backup of ${database} finished"
@@ -433,7 +439,7 @@ function exit {
 # This is also used by help2man to generate the man page.
 #
 function show_help_message {
-  echo "Usage: databaseBackup [OPTIONS]"
+  echo "Usage: ${_PROGRAM_NAME} [OPTIONS]"
   echo ""
   echo "Backup a local database server to S3."
   echo ""

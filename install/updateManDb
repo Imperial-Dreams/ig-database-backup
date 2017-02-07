@@ -1,0 +1,3 @@
+#!/bin/bash
+
+mandb 1> /dev/null

@@ -1,0 +1,34 @@
+{
+  "name": "ig backup manager",
+  "install": {
+    "map": [
+      {
+         "source": "./",
+         "installTo": "./",
+         "excludes": [
+            "man",
+            "dev",
+            "install"
+         ]
+      }, 
+      {
+        "source": "./man/man1/",
+        "installTo": "/usr/share/man/man1/"
+      }
+    ],
+    "scripts": {
+      "afterInstall": [
+        "install/updateManDb"
+      ]
+    }
+  },
+  "dependencies": [
+    {
+      "source": "git@github.com:rudimeier/bash_ini_parser.git#master",
+      "installTo": "./bash_ini_parser",
+      "excludes": [
+        "test"
+      ]
+    }
+  ]
+}
