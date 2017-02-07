@@ -1,7 +1,11 @@
 #!/bin/bash
-
+pwd
 if [[ ! -e "/usr/local/bin/igbm" ]]; then
+  echo "Creating link."
   ln -s ./igbm /usr/local/bin/igbm
+else
+  echo "Link exists. Skipping"
 fi
 
+echo "Cleaning up...."
 rm linkToBin
