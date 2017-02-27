@@ -446,12 +446,11 @@ function show_help_message {
   echo "This backups up databases to individual files on S3. It can be"
   echo "configured to retain a set number of backups. Each database can"
   echo "be managed independently."
-
-  printf " %-15s%s\n" "-d --debug [LEVEL]" "Display debug information. More"
-  printf " %-15s%s\n" " " "information is available with -dd or by setting"
-  printf " %-15s%s\n" " " "--debug=2"
-  printf " %-15s%s\n" "-h --help" "Display this or help"
-  printf " %-15s%s\n" "-v --version" "Display the version information"
+  echo ""
+  printf " %-18s %s\n" "-d --debug [LEVEL]" "Display debug information. More information"
+  printf " %-18s %s\n" " " "is available with -dd or by setting --debug=2"
+  printf " %-18s %s\n" "-h --help" "Display this or help"
+  printf " %-18s %s\n" "-v --version" "Display the version information"
   echo ""
   if [[ ! -z "$2" ]]; then
     if [[ "$1" == "0" ]]; then
