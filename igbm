@@ -10,7 +10,7 @@
 ##############################################################################
 
 _PROGRAM_NAME=$(readlink --canonicalize --no-newline "$0" | xargs basename )
-_PROGRAM_VERSION="1.0.0"
+_PROGRAM_VERSION="1.0.1"
 
 readonly INFO=2
 readonly NOTICE=1
@@ -198,7 +198,7 @@ function backup_database {
    #                     #
   #######################
 
-  if [[ "${zip_database}" == 1 ]]; then
+  if [[ "${zip_database}" == "1" ]]; then
     if ! tar --create --gzip --file "${uploadFileLocation}" --directory "${backupDirectory}" "${backupFile}"; then
       error "ERROR: Unable to zip backup of ${database}"
       error "ERROR: Attempting to upload unziped file"
@@ -236,13 +236,13 @@ function backup_database {
     return "${EXIT_PRUNING}"
   fi
 
-  if [[ "${backups_to_keep}" == "all" || "${backups_to_kep}" -eq "0" ]]; then
+  if [[ "${backups_to_keep}" == "all" || "${backups_to_keep}" -eq "0" ]]; then
     info "Backups to keep (${backups_to_keep}) is zero. Pruning ${database} is"
     info "disabled."
     notice "Backup of ${database} finished"
     return 0
   fi
-  if [[ "${#backup_files[@]}" -lt "${backups_to_keep}" || "${backups_to_kep}" -eq "0" ]]; then
+  if [[ "${#backup_files[@]}" -lt "${backups_to_keep}" || "${backups_to_keep}" -eq "0" ]]; then
     info "Backups to keep (${backups_to_keep}) is greater than the number of"
     info "existing backups (${#backup_files[@]}) of ${database}. Not pruning."
     notice "Backup of ${database} finished"
