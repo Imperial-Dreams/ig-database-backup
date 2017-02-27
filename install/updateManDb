@@ -1,3 +1,14 @@
 #!/bin/bash
+##############################################################################
+#
+# IG Database Backup Script
+#
+# Man page update script
+#
+# Copyright (c) 2017 Shane Rogers
+#
+# License: BSD-3-Clause, see ../LICENSE file
+#
+##############################################################################
 
 mandb 1> /dev/null

@@ -1,0 +1,70 @@
+#!/bin/bash
+##############################################################################
+#
+# IG Database Backup Script
+#
+# Link installation script
+#
+# Copyright (c) 2017 Shane Rogers
+#
+# License: BSD-3-Clause, see ../LICENSE file
+#
+##############################################################################
+
+# List of possible places to link the script. The list is checked in order
+# and the first pre-existing writable location is used.
+declare -a targetLocations=( \
+  "/usr/local/bin"           \
+  "/usr/bin"                 \
+)
+
+if [[ -z "${MUM_CURRENT_INSTALL_DIR}" ]]; then
+  echo "Automatic link installation requires MUM 0.2.9-alpha.2 or later" 1>&2
+  echo "" 1>&2
+  echo "You can work around this by exporting a variable named MUM_CURRENT_INSTALL_DIR" 1>&2
+  echo "that points to the target install directory. However, updating mum is recommended." 1>&2
+  exit 1
+fi
+
+binLocation="${MUM_CURRENT_INSTALL_DIR}"
+exitCode=1
+
+for targetLocation in "${targetLocations[@]}"; do
+  if [[ ! -e "${targetLocation}" ]]; then
+    echo "Skipping ${targetLocation} because it does not exist"
+    continue
+  fi
+
+  if [[ -e "${targetLocation}/igbm" || -L "${targetLocation}/igbm" ]]; then
+    linkTarget=$( readlink -m "${targetLocation}/igbm" )
+    if [[ "${linkTarget}" == "${binLocation}/igbm" ]]; then
+      echo "Link already exists in ${targetLocation}/igbm"
+      exitCode=0
+      break
+    else
+      echo "Can not make link at ${targetLocation}/igbm because something else is there" 1>&2
+      continue
+    fi
+  elif [[ ! -w "${targetLocation}" ]]; then
+    echo "Skipping ${targetLocation} because it is not writable" 1>&2
+    continue
+  else
+    echo "Creating link in ${targetLocation}"
+    cd "${targetLocation}"
+    ln -s "${binLocation}/igbm" igbm || echo "Error creating link in ${targetLocation}" 1>&2
+    if [[ ! -L "${targetLocation}/igbm" ]]; then
+      echo "Link does not exist after creation in ${targetLocation}" 1>&2
+    else
+      exitCode=0
+      break
+    fi
+  fi
+done
+
+if [[ "${exitCode}" -eq "0" ]]; then
+  echo "Done"
+else
+  echo "No more locations to attempt. Unable to create system link" 1>&2
+fi
+
+exit "${exitCode}"
