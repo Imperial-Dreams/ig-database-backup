@@ -138,7 +138,7 @@ function backup_database {
     info "Found custom bucket for ${database}: ${bucket_name}"
   elif [[ -n "${defaultBucket}" ]]; then
     bucket_name="${defaultBucket}"
-    info "Using default bucklet for ${database}"
+    info "Using default bucket for ${database}"
   else
     error "ERROR: ${database} has no custom bucket and no default bucket is set"
     error "ERROR: The backup for ${database} can not be uploaded."
